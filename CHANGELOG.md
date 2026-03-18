@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] — 2026-03-18
+
+### Added
+- `modules/push.sh` — new push module with remote/branch resolution and SSH validation
+- `module_push()` — public entry point: supports `--remote`, `--branch` and `--dry-run`
+- `_push_resolve_remote()` — resolves and validates remote existence via `git remote get-url`
+- `_push_resolve_branch()` — resolves current branch via `git rev-parse --abbrev-ref HEAD`
+- `_push_extract_host()` — extracts hostname from SSH (`git@host:...`) and HTTPS remote URLs
+- `_push_test_ssh()` — tests SSH authentication via `ssh -T git@<host>` with i18n error handling
+- `_push_execute()` — performs `git push <remote> <branch>` respecting `--dry-run`
+- SSH validation flow: detects SSH vs HTTPS remote, tests connection, reports failures via i18n
+- Support for GitHub (`github.com`) and GitLab (`gitlab.com`) SSH fingerprint messages
+- `autogit push` registered in the main dispatcher and `cmd_help()`
+- `--push` flag added to `autogit commit` (autonomous mode)
+- `--remote` and `--branch` flags added to `autogit commit` (passed through to push)
+- Interactive post-commit prompt: asks whether to push now or accumulate more commits
+- `_commit_ask_push()` — isolated function handling the post-commit push decision
+- i18n keys added for all push and SSH messages in `pt_BR.lang` and `en_US.lang`
+
+### Changed
+- `modules/commit.sh` updated: added `--push`, `--remote`, `--branch` flag parsing
+- `modules/commit.sh` updated: `_commit_execute()` now calls `_commit_ask_push()` after success
+- `autogit` main script bumped to v0.3.0
+- `cmd_help()` updated to list `push` command with flags
+
+### Notes
+- Push of tags (`git push --tags`) is intentionally excluded — planned for v0.4.0
+- Full SSH wizard (key generation, ssh-agent, multi-platform tutorials) planned for v0.5.0
+- For HTTPS remotes, SSH validation is skipped and push proceeds directly
+- If SSH validation fails, AutoGit reports the failure clearly and exits — key setup wizard comes in v0.5.0
+
+---
+
 ## [0.2.0] — 2026-03-18
 
 ### Added

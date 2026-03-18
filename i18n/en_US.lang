@@ -1,0 +1,22 @@
+# en_US.lang — English (United States) locale for AutoGit
+# English fallback locale for AutoGit
+
+# --- General ---
+MSG_LANG_LOADED="Language loaded: English (United States)"
+MSG_UNKNOWN_CMD="Unknown command"
+MSG_USAGE="Usage: autogit <command> [options]"
+MSG_RUN_HELP="Run 'autogit help' to see available commands."
+MSG_MISSING_DEPS="Missing dependency: %s. Please install it and try again."
+MSG_GIT_NOT_REPO="This directory is not a Git repository."
+MSG_GIT_NOT_FOUND="Git not found. Please install Git and try again."
+MSG_ABORTED="Operation aborted by user."
+MSG_DONE="Done successfully."
+MSG_ERROR="Error"
+MSG_WARNING="Warning"
+MSG_INFO="Info"
+
+# --- Help ---
+MSG_HELP_HEADER="AutoGit — Git workflow automation tool"
+MSG_HELP_USAGE="Usage: autogit <command> [options]"
+MSG_HELP_COMMANDS="Available commands:"
+MSG_HELP_FOOTER="For details on a command: autogit help <command>"

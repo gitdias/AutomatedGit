@@ -1,0 +1,22 @@
+# pt_BR.lang — Brazilian Portuguese locale for AutoGit
+# Locale em português do Brasil para o AutoGit
+
+# --- General ---
+MSG_LANG_LOADED="Idioma carregado: Português (Brasil)"
+MSG_UNKNOWN_CMD="Comando desconhecido"
+MSG_USAGE="Uso: autogit <comando> [opções]"
+MSG_RUN_HELP="Execute 'autogit help' para ver os comandos disponíveis."
+MSG_MISSING_DEPS="Dependência ausente: %s. Instale-a e tente novamente."
+MSG_GIT_NOT_REPO="Este diretório não é um repositório Git."
+MSG_GIT_NOT_FOUND="Git não encontrado. Instale o Git e tente novamente."
+MSG_ABORTED="Operação abortada pelo usuário."
+MSG_DONE="Concluído com sucesso."
+MSG_ERROR="Erro"
+MSG_WARNING="Atenção"
+MSG_INFO="Info"
+
+# --- Help ---
+MSG_HELP_HEADER="AutoGit — Automatizador de fluxo Git"
+MSG_HELP_USAGE="Uso: autogit <comando> [opções]"
+MSG_HELP_COMMANDS="Comandos disponíveis:"
+MSG_HELP_FOOTER="Para detalhes de um comando: autogit help <comando>"

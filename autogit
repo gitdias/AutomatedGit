@@ -5,7 +5,7 @@
 # Compatible with: bash 4+, zsh 5+
 # Author: Sandro Dias <https://github.com/gitdias>
 # License: Apache-2.0
-# Version: 0.1.0
+# Version: 0.2.0
 
 # ---------------------------------------------------------------------------
 # Strict mode — exit on error, undefined variable or pipe failure
@@ -15,9 +15,10 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Internal constants
 # ---------------------------------------------------------------------------
-readonly AUTOGIT_VERSION="0.1.0"
+readonly AUTOGIT_VERSION="0.2.0"
 readonly AUTOGIT_DIR="${HOME}/.local/bin/autogit"
 readonly AUTOGIT_I18N_DIR="${AUTOGIT_DIR}/i18n"
+readonly AUTOGIT_MODULES_DIR="${AUTOGIT_DIR}/modules"
 readonly AUTOGIT_FALLBACK_LOCALE="en_US"
 
 # ---------------------------------------------------------------------------
@@ -26,12 +27,16 @@ readonly AUTOGIT_FALLBACK_LOCALE="en_US"
 # Falls back to en_US if the detected locale is not available.
 # ---------------------------------------------------------------------------
 _autogit_load_locale() {
-    # Resolve locale from environment variables in priority order
     local raw_locale="${LANG:-${LANGUAGE:-${LC_ALL:-}}}"
 
     # Normalize: extract only language_REGION (e.g., "pt_BR" from "pt_BR.UTF-8")
     local locale
     locale="$(echo "${raw_locale}" | cut -d'.' -f1 | cut -d'@' -f1)"
+
+    # Allow runtime locale override via --lang / -l flag (set before this call)
+    if [[ -n "${AUTOGIT_LANG_OVERRIDE:-}" ]]; then
+        locale="${AUTOGIT_LANG_OVERRIDE}"
+    fi
 
     local lang_file="${AUTOGIT_I18N_DIR}/${locale}.lang"
     local fallback_file="${AUTOGIT_I18N_DIR}/${AUTOGIT_FALLBACK_LOCALE}.lang"
@@ -40,23 +45,36 @@ _autogit_load_locale() {
         # shellcheck source=/dev/null
         source "${lang_file}"
     elif [[ -f "${fallback_file}" ]]; then
-        # Fallback to en_US when the detected locale has no .lang file
         source "${fallback_file}"
         locale="${AUTOGIT_FALLBACK_LOCALE}"
     else
-        # Last resort: hardcoded English messages to avoid silent failure
         echo "ERROR: No locale files found in '${AUTOGIT_I18N_DIR}'." >&2
         echo "Please reinstall AutoGit." >&2
         exit 1
     fi
 
-    # Export locale name for use by submodules in future versions
     export AUTOGIT_LOCALE="${locale}"
 }
 
 # ---------------------------------------------------------------------------
+# Module loader — sources a module file from the modules/ directory
+# Aborts with a clear error if the module file does not exist.
+# ---------------------------------------------------------------------------
+_autogit_load_module() {
+    local module_name="$1"
+    local module_file="${AUTOGIT_MODULES_DIR}/${module_name}.sh"
+
+    if [[ ! -f "${module_file}" ]]; then
+        echo "ERROR: Module not found: ${module_file}" >&2
+        exit 1
+    fi
+
+    # shellcheck source=/dev/null
+    source "${module_file}"
+}
+
+# ---------------------------------------------------------------------------
 # Output helpers
-# Standardized logging functions using i18n message variables.
 # ---------------------------------------------------------------------------
 
 # Print an informational message to stdout
@@ -76,7 +94,6 @@ msg_die() {
 }
 
 # Print a formatted message using printf-style substitution (%s placeholders)
-# Usage: msg_fmt "$MSG_TEMPLATE" "value"
 msg_fmt() {
     local template="$1"
     shift
@@ -86,18 +103,15 @@ msg_fmt() {
 
 # ---------------------------------------------------------------------------
 # Dependency checks
-# Validates required external tools before any operation is performed.
 # ---------------------------------------------------------------------------
 _autogit_check_deps() {
-    # Git is the only hard dependency at this stage
     if ! command -v git &>/dev/null; then
         msg_die "${MSG_GIT_NOT_FOUND}"
     fi
 }
 
 # ---------------------------------------------------------------------------
-# Git repository check
-# Ensures the current directory is inside a Git repository.
+# Git repository guard
 # ---------------------------------------------------------------------------
 _autogit_require_repo() {
     if ! git rev-parse --git-dir &>/dev/null; then
@@ -106,14 +120,50 @@ _autogit_require_repo() {
 }
 
 # ---------------------------------------------------------------------------
+# Global options pre-parser
+# Extracts --lang / -l and --dry-run before command dispatching.
+# Remaining arguments are collected into the global AUTOGIT_ARGS array.
+# ---------------------------------------------------------------------------
+_autogit_parse_globals() {
+    AUTOGIT_ARGS=()
+    AUTOGIT_DRY_RUN="false"
+    AUTOGIT_LANG_OVERRIDE=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --lang|-l)
+                shift
+                AUTOGIT_LANG_OVERRIDE="${1:-}"
+                ;;
+            --dry-run)
+                AUTOGIT_DRY_RUN="true"
+                ;;
+            *)
+                # Preserve non-global arguments for the command dispatcher
+                AUTOGIT_ARGS+=("$1")
+                ;;
+        esac
+        shift
+    done
+
+    export AUTOGIT_DRY_RUN
+    export AUTOGIT_LANG_OVERRIDE
+}
+
+# ---------------------------------------------------------------------------
 # Help command
-# Displays usage information. Will be expanded as commands are added.
 # ---------------------------------------------------------------------------
 cmd_help() {
     printf "\n%s — v%s\n" "${MSG_HELP_HEADER}" "${AUTOGIT_VERSION}"
     printf "%s\n\n" "${MSG_HELP_USAGE}"
     printf "%s\n" "${MSG_HELP_COMMANDS}"
-    printf "  %-14s %s\n" "help" "$(printf "%s" "${MSG_HELP_FOOTER}")"
+    printf "  %-14s %s\n" "commit"  "Commit + tag (interactive or autonomous)"
+    printf "  %-14s %s\n" "help"    "${MSG_HELP_FOOTER}"
+    printf "  %-14s %s\n" "version" "Show AutoGit version"
+    printf "\n%s\n" "${MSG_HELP_OPTIONS}"
+    printf "%s\n" "${MSG_HELP_OPT_HELP}"
+    printf "%s\n" "${MSG_HELP_OPT_LANG}"
+    printf "%s\n" "${MSG_HELP_OPT_DRYRUN}"
     printf "\n"
 }
 
@@ -129,10 +179,19 @@ cmd_version() {
 # Routes the first argument to the corresponding command function.
 # ---------------------------------------------------------------------------
 _autogit_dispatch() {
-    local cmd="${1:-help}"
-    shift || true
+    local cmd="${1:-}"
+    [[ $# -gt 0 ]] && shift || true
 
     case "${cmd}" in
+        "")
+            # No command: launch interactive commit wizard
+            _autogit_load_module "commit"
+            module_commit
+            ;;
+        commit)
+            _autogit_load_module "commit"
+            module_commit "$@"
+            ;;
         help|-h|--help)
             cmd_help
             ;;
@@ -140,7 +199,6 @@ _autogit_dispatch() {
             cmd_version
             ;;
         *)
-            # Unknown command: display error and usage hint
             msg_warn "${MSG_UNKNOWN_CMD}: '${cmd}'"
             printf "%s\n" "${MSG_RUN_HELP}"
             exit 1
@@ -152,9 +210,10 @@ _autogit_dispatch() {
 # Bootstrap — entry point
 # ---------------------------------------------------------------------------
 main() {
+    _autogit_parse_globals "$@"
     _autogit_load_locale
     _autogit_check_deps
-    _autogit_dispatch "$@"
+    _autogit_dispatch "${AUTOGIT_ARGS[@]+"${AUTOGIT_ARGS[@]}"}"
 }
 
 main "$@"

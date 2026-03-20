@@ -1,175 +1,270 @@
 #!/usr/bin/env bash
-# modules/push.sh — Push module for AutoGit
-# Handles remote validation, SSH authentication check and git push execution.
+# modules/push — Push module for AutoGit
+# Resolves remote and branch, validates SSH authentication,
+# sanitizes malformed remote URLs, and performs git push.
 #
 # Depends on: autogit (core), i18n locale already loaded
 # Compatible with: bash 4+, zsh 5+
 
 # ---------------------------------------------------------------------------
-# _push_resolve_remote — Validate and resolve the target remote
-# Arguments: $1 — remote name (default: origin)
-# Output: prints ONLY the remote URL to stdout; all messages go to stderr
+# _push_sanitize_ssh_url — Detect and fix duplicated hostname in SSH URL
+# Arguments: $1 — raw URL, $2 — remote name
+# Output: prints sanitized URL to stdout
+# Side effect: offers to persist correction via git remote set-url
+# ---------------------------------------------------------------------------
+_push_sanitize_ssh_url() {
+    local url="$1"
+    local remote="$2"
+
+    # SSH URL pattern: git@<host>:<path>.git
+    # Malformed example: git@github.com:gitdias/github.com/gitdias/AutomatedGit.git
+    # The path starts with a segment that matches the hostname — detect and strip it.
+
+    # Extract host from URL (e.g.: github.com)
+    local host
+    host="$(printf "%s" "${url}" | sed -n 's|^git@|$[^:]*$|:.*|\1|p')"
+
+    if [[ -z "${host}" ]]; then
+        # Not an SSH URL — nothing to sanitize
+        printf "%s" "${url}"
+        return 0
+    fi
+
+    # Extract path after host: (e.g.: gitdias/github.com/gitdias/AutomatedGit.git)
+    local path
+    path="$(printf "%s" "${url}" | sed -n "s|^git@${host}:||p")"
+
+    # Check if path starts with the hostname (duplicated segment)
+    # e.g.: github.com/gitdias/AutomatedGit.git → gitdias/AutomatedGit.git
+    if printf "%s" "${path}" | grep -q "^${host}/"; then
+        local fixed_path
+        fixed_path="$(printf "%s" "${path}" | sed "s|^${host}/||")"
+        local fixed_url="git@${host}:${fixed_path}"
+
+        msg_fmt "${MSG_PUSH_URL_MALFORMED}" "${remote}" "${url}" >&2
+        msg_fmt "${MSG_PUSH_URL_FIXED}" "${fixed_url}" >&2
+
+        # Ask user if they want to persist the fix
+        local answer=""
+        printf "%s" "$(printf "${MSG_PUSH_URL_FIX_PROMPT}" "${remote}")" >&2
+        read -r answer
+
+        case "${answer,,}" in
+            s|y|sim|yes)
+                git remote set-url "${remote}" "${fixed_url}"
+                msg_fmt "${MSG_PUSH_URL_FIX_APPLIED}" "${remote}" >&2
+                ;;
+            *)
+                msg_info "${MSG_PUSH_URL_FIX_SKIPPED}" >&2
+                ;;
+        esac
+
+        printf "%s" "${fixed_url}"
+        return 0
+    fi
+
+    # HTTPS URL pattern: https://<host>/<path>
+    # Malformed example: https://github.com/github.com/gitdias/AutomatedGit.git
+    local https_host
+    https_host="$(printf "%s" "${url}" | sed -n 's|^https://|$[^/]*$|/.*|\1|p')"
+
+    if [[ -n "${https_host}" ]]; then
+        local https_path
+        https_path="$(printf "%s" "${url}" | sed -n "s|^https://${https_host}/||p")"
+
+        if printf "%s" "${https_path}" | grep -q "^${https_host}/"; then
+            local fixed_https_path
+            fixed_https_path="$(printf "%s" "${https_path}" | sed "s|^${https_host}/||")"
+            local fixed_https_url="https://${https_host}/${fixed_https_path}"
+
+            msg_fmt "${MSG_PUSH_URL_MALFORMED}" "${remote}" "${url}" >&2
+            msg_fmt "${MSG_PUSH_URL_FIXED}" "${fixed_https_url}" >&2
+
+            local answer=""
+            printf "%s" "$(printf "${MSG_PUSH_URL_FIX_PROMPT}" "${remote}")" >&2
+            read -r answer
+
+            case "${answer,,}" in
+                s|y|sim|yes)
+                    git remote set-url "${remote}" "${fixed_https_url}"
+                    msg_fmt "${MSG_PUSH_URL_FIX_APPLIED}" "${remote}" >&2
+                    ;;
+                *)
+                    msg_info "${MSG_PUSH_URL_FIX_SKIPPED}" >&2
+                    ;;
+            esac
+
+            printf "%s" "${fixed_https_url}"
+            return 0
+        fi
+    fi
+
+    # URL is clean — return as-is
+    printf "%s" "${url}"
+}
+
+# ---------------------------------------------------------------------------
+# _push_resolve_remote — Validate remote existence and return its URL
+# Arguments: $1 — remote name
+# Output: prints sanitized remote URL to stdout; log messages go to stderr
 # ---------------------------------------------------------------------------
 _push_resolve_remote() {
     local remote="$1"
 
-    # All informational output goes to stderr to avoid polluting stdout capture
     msg_fmt "${MSG_PUSH_REMOTE_RESOLVING}" "${remote}" >&2
 
-    # Abort if the remote does not exist in the repository
     if ! git remote get-url "${remote}" &>/dev/null; then
         msg_fmt "${MSG_PUSH_REMOTE_NOT_FOUND}" "${remote}" >&2
         exit 1
     fi
 
+    local raw_url
+    raw_url="$(git remote get-url "${remote}")"
+
+    # Sanitize before returning — fixes duplicated hostname silently or interactively
     local url
-    url="$(git remote get-url "${remote}")"
+    url="$(_push_sanitize_ssh_url "${raw_url}" "${remote}")"
 
     msg_fmt "${MSG_PUSH_REMOTE_URL}" "${url}" >&2
-
-    # Only the raw URL goes to stdout — nothing else
     printf "%s" "${url}"
 }
 
 # ---------------------------------------------------------------------------
-# _push_resolve_branch — Resolve the current or specified branch
-# Arguments: $1 — branch name (empty = use current branch)
-# Output: prints ONLY the branch name to stdout; all messages go to stderr
+# _push_resolve_branch — Return the current branch name
+# Arguments: $1 — optional explicit branch name
+# Output: prints branch name to stdout; log messages go to stderr
 # ---------------------------------------------------------------------------
 _push_resolve_branch() {
-    local branch="$1"
+    local branch="${1:-}"
 
     if [[ -z "${branch}" ]]; then
-        # Detect current branch name
         branch="$(git rev-parse --abbrev-ref HEAD)"
     fi
 
     msg_fmt "${MSG_PUSH_BRANCH_RESOLVING}" "${branch}" >&2
-
-    # Only the branch name goes to stdout — nothing else
     printf "%s" "${branch}"
 }
 
 # ---------------------------------------------------------------------------
-# _push_extract_host — Extract protocol and SSH host from a remote URL
-# Supports formats:
-#   git@github.com:user/repo.git
-#   ssh://git@github.com/user/repo.git
-#   https://github.com/user/repo.git
-# Arguments: $1 — remote URL (raw, no extra content)
-# Output: prints "ssh:<host>" or "https:<host>" to stdout
+# _push_extract_host — Extract hostname from SSH or HTTPS remote URL
+# Arguments: $1 — remote URL
+# Output: prints hostname to stdout
 # ---------------------------------------------------------------------------
 _push_extract_host() {
     local url="$1"
 
-    if [[ "${url}" =~ ^git@ ]]; then
-        # Format: git@host:path — extract host between @ and :
-        local host
-        host="$(printf "%s" "${url}" | cut -d'@' -f2 | cut -d':' -f1)"
-        printf "ssh:%s" "${host}"
-
-    elif [[ "${url}" =~ ^ssh:// ]]; then
-        # Format: ssh://git@host/path — extract host after @
-        local host
-        host="$(printf "%s" "${url}" | sed 's|ssh://[^@]*@||' | cut -d'/' -f1)"
-        printf "ssh:%s" "${host}"
-
-    elif [[ "${url}" =~ ^https?:// ]]; then
-        # Format: https://host/path
-        local host
-        host="$(printf "%s" "${url}" | sed 's|https\?://||' | cut -d'/' -f1)"
-        printf "https:%s" "${host}"
-
-    else
-        msg_fmt "${MSG_PUSH_PROTOCOL_UNKNOWN}" "${url}" >&2
-        exit 1
+    # SSH format: git@host:user/repo.git
+    if printf "%s" "${url}" | grep -q "^git@"; then
+        printf "%s" "${url}" | sed -n 's|^git@|$[^:]*$|:.*|\1|p'
+        return 0
     fi
+
+    # HTTPS format: https://host/user/repo.git
+    if printf "%s" "${url}" | grep -q "^https://"; then
+        printf "%s" "${url}" | sed -n 's|^https://|$[^/]*$|/.*|\1|p'
+        return 0
+    fi
+
+    # SSH explicit format: ssh://git@host/user/repo.git
+    if printf "%s" "${url}" | grep -q "^ssh://"; then
+        printf "%s" "${url}" | sed -n 's|^ssh://git@|$[^/]*$|/.*|\1|p'
+        return 0
+    fi
+
+    printf ""
 }
 
 # ---------------------------------------------------------------------------
 # _push_test_ssh — Test SSH authentication against a known host
-# Arguments: $1 — hostname (e.g.: github.com)
-# Returns: 0 if authenticated, 1 if failed
+# Arguments: $1 — hostname
 # ---------------------------------------------------------------------------
 _push_test_ssh() {
     local host="$1"
-    local exit_code=0
 
-    msg_fmt "${MSG_PUSH_SSH_TESTING}" "${host}" >&2
+    msg_fmt "${MSG_PUSH_SSH_TESTING}" "${host}"
 
-    # ssh -T: disable pseudo-terminal; BatchMode: no password prompts
-    # GitHub exits with code 1 even on success; GitLab exits 0 on success
-    # We check stderr output instead of exit code for reliability
-    local ssh_output
+    local ssh_output exit_code=0
     ssh_output="$(ssh -T \
         -o BatchMode=yes \
         -o ConnectTimeout=8 \
         "git@${host}" 2>&1)" || exit_code=$?
 
-    # Normalize output to lowercase for pattern matching
     local output_lower
     output_lower="$(printf "%s" "${ssh_output}" | tr '[:upper:]' '[:lower:]')"
 
-    # GitHub: "you've successfully authenticated"
-    # GitLab: "welcome to gitlab"
-    if printf "%s" "${output_lower}" | grep -qE \
-        "successfully authenticated|welcome to gitlab"; then
-        msg_fmt "${MSG_PUSH_SSH_OK}" "${host}" >&2
+    # Check known success patterns per host
+    local success=false
+    case "${host}" in
+        github.com)
+            printf "%s" "${output_lower}" \
+                | grep -q "successfully authenticated" && success=true
+            ;;
+        gitlab.com)
+            printf "%s" "${output_lower}" \
+                | grep -q "welcome to gitlab" && success=true
+            ;;
+        git.code.sf.net)
+            printf "%s" "${output_lower}" \
+                | grep -qE "interactive git shell is not enabled|welcome to sourceforge" \
+                && success=true
+            ;;
+        codeberg.org)
+            printf "%s" "${output_lower}" \
+                | grep -qE "hi .*, you've successfully authenticated" && success=true
+            ;;
+        *)
+            # Unknown host — warn but do not block push
+            msg_fmt "${MSG_PUSH_HOST_UNSUPPORTED}" "${host}"
+            return 0
+            ;;
+    esac
+
+    if [[ "${success}" == "true" ]]; then
+        msg_fmt "${MSG_PUSH_SSH_OK}" "${host}"
         return 0
     fi
 
-    # Known failure patterns: key missing or not authorized
-    if printf "%s" "${output_lower}" | grep -qE \
-        "permission denied|publickey|no supported authentication"; then
-        msg_fmt "${MSG_PUSH_SSH_FAIL}"        "${host}" >&2
-        msg_info "${MSG_PUSH_SSH_HINT}"               >&2
-        msg_info "${MSG_PUSH_SSH_HINT2}"              >&2
-        return 1
-    fi
-
-    # Host unreachable or unknown
-    if printf "%s" "${output_lower}" | grep -qE \
-        "could not resolve|connection refused|no route to host|connection timed out"; then
-        msg_fmt "${MSG_PUSH_SSH_UNKNOWN_HOST}" "${host}" >&2
-        return 1
-    fi
-
-    # Unrecognized output: warn but do not block the push
-    msg_fmt "${MSG_PUSH_HOST_UNSUPPORTED}" "${host}" >&2
-    return 0
+    msg_fmt "${MSG_PUSH_SSH_FAIL}" "${host}"
+    msg_info "${MSG_PUSH_SSH_HINT}"
+    msg_info "${MSG_PUSH_SSH_HINT2}"
+    exit 1
 }
 
 # ---------------------------------------------------------------------------
-# _push_validate_connection — Detect protocol and run SSH check if needed
-# Arguments: $1 — raw remote URL
+# _push_validate_connection — Detect protocol and validate SSH if needed
+# Arguments: $1 — remote URL
 # ---------------------------------------------------------------------------
 _push_validate_connection() {
     local url="$1"
 
-    local proto_host
-    proto_host="$(_push_extract_host "${url}")"
+    if printf "%s" "${url}" | grep -qE "^git@|^ssh://"; then
+        msg_info "${MSG_PUSH_PROTOCOL_SSH}"
+        local host
+        host="$(_push_extract_host "${url}")"
 
-    local protocol="${proto_host%%:*}"
-    local host="${proto_host#*:}"
+        if [[ -z "${host}" ]]; then
+            msg_fmt "${MSG_PUSH_PROTOCOL_UNKNOWN}" "${url}"
+            exit 1
+        fi
 
-    case "${protocol}" in
-        ssh)
-            msg_info "${MSG_PUSH_PROTOCOL_SSH}"
-            # Abort if SSH authentication fails
-            if ! _push_test_ssh "${host}"; then
-                exit 1
-            fi
-            ;;
-        https)
-            msg_info "${MSG_PUSH_PROTOCOL_HTTPS}"
-            msg_info "${MSG_PUSH_HTTPS_INFO}"
-            ;;
-    esac
+        _push_test_ssh "${host}"
+        return 0
+    fi
+
+    if printf "%s" "${url}" | grep -q "^https://"; then
+        msg_info "${MSG_PUSH_PROTOCOL_HTTPS}"
+        msg_info "${MSG_PUSH_HTTPS_INFO}"
+        return 0
+    fi
+
+    msg_fmt "${MSG_PUSH_PROTOCOL_UNKNOWN}" "${url}"
+    exit 1
 }
 
 # ---------------------------------------------------------------------------
-# _push_execute — Run git push or simulate it in dry-run mode
+# _push_execute — Perform the actual git push
 # Arguments: $1 — remote, $2 — branch
+# Respects AUTOGIT_DRY_RUN
 # ---------------------------------------------------------------------------
 _push_execute() {
     local remote="$1"
@@ -196,7 +291,6 @@ module_push() {
     local remote="origin"
     local branch=""
 
-    # Parse push-specific arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --remote)
@@ -224,16 +318,12 @@ module_push() {
 
     printf "\n%s\n\n" "${MSG_PUSH_TITLE}"
 
-    # Resolve remote URL — stdout only receives the raw URL
     local remote_url
     remote_url="$(_push_resolve_remote "${remote}")"
 
-    # Resolve branch name — stdout only receives the branch name
-    branch="$(_push_resolve_branch "${branch}")"
+    local resolved_branch
+    resolved_branch="$(_push_resolve_branch "${branch}")"
 
-    # Validate connection (SSH test or HTTPS notice)
     _push_validate_connection "${remote_url}"
-
-    # Execute the push
-    _push_execute "${remote}" "${branch}"
+    _push_execute "${remote}" "${resolved_branch}"
 }

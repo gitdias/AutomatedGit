@@ -129,3 +129,12 @@ MSG_SSH_SETUP_ABORTED="Configuração SSH encerrada sem confirmação de autenti
 MSG_SSH_INVALID_OPT="Opção inválida para ssh-setup: %s"
 MSG_SSH_HOST_UNKNOWN="Host não reconhecido: '%s'. Use: github, gitlab, sourceforge ou codeberg."
 MSG_SSH_DETECT_HOST_PROMPT="Não foi possível detectar o serviço pelo nome da chave. Selecione manualmente:"
+
+# --- Push module (v0.5.1 additions) ---
+MSG_PUSH_URL_MALFORMED="URL do remote '%s' parece malformada: %s"
+MSG_PUSH_URL_FIXED="URL corrigida automaticamente para: %s"
+MSG_PUSH_URL_FIX_PROMPT="Deseja atualizar o remote '%s' com a URL corrigida? [s/N]: "
+MSG_PUSH_URL_FIX_APPLIED="Remote '%s' atualizado com sucesso."
+MSG_PUSH_URL_FIX_SKIPPED="Continuando com a URL corrigida apenas para esta operação."
+MSG_PUSH_URL_FIX_FAILED="Não foi possível corrigir automaticamente a URL: %s"
+

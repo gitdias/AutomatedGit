@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# modules/push_tags.sh — Push tags module for AutoGit
+# Validates local and remote tags, then pushes all local tags to the remote.
+#
+# Depends on: autogit (core), modules/push.sh (SSH validation helpers)
+# Compatible with: bash 4+, zsh 5+
+
+# ---------------------------------------------------------------------------
+# _push_tags_check_local — Verify that there are local tags to push
+# Output: prints space-separated list of local tags to stdout
+# ---------------------------------------------------------------------------
+_push_tags_check_local() {
+    msg_info "${MSG_PUSH_TAGS_CHECKING_LOCAL}" >&2
+
+    local tags
+    tags="$(git tag --list)"
+
+    if [[ -z "${tags}" ]]; then
+        msg_info "${MSG_PUSH_TAGS_NONE_LOCAL}" >&2
+        return 1
+    fi
+
+    # Print tags as a single line for display purposes
+    local tags_inline
+    tags_inline="$(printf "%s" "${tags}" | tr '\n' ' ' | sed 's/ $//')"
+    msg_fmt "${MSG_PUSH_TAGS_LIST_LOCAL}" "${tags_inline}" >&2
+
+    printf "%s" "${tags}"
+}
+
+# ---------------------------------------------------------------------------
+# _push_tags_check_remote — List tags already present on the remote
+# Arguments: $1 — remote name
+# Output: prints newline-separated list of remote tag names to stdout
+# ---------------------------------------------------------------------------
+_push_tags_check_remote() {
+    local remote="$1"
+
+    msg_fmt "${MSG_PUSH_TAGS_CHECKING_REMOTE}" "${remote}" >&2
+
+    # git ls-remote --tags outputs lines like:
+    # abc123  refs/tags/v0.1.0
+    # We extract only the tag name after refs/tags/
+    git ls-remote --tags "${remote}" 2>/dev/null \
+        | awk '{print $2}' \
+        | grep -v '\^{}' \
+        | sed 's|refs/tags/||' \
+        || true
+}
+
+# ---------------------------------------------------------------------------
+# _push_tags_report_skipped — Warn about tags that already exist on remote
+# Arguments: $1 — remote name, remaining — tag names to check
+# ---------------------------------------------------------------------------
+_push_tags_report_skipped() {
+    local remote="$1"
+    shift
+    local remote_tags=("$@")
+
+    # Retrieve local tags again for comparison
+    local local_tags
+    mapfile -t local_tags < <(git tag --list)
+
+    for tag in "${local_tags[@]}"; do
+        if printf "%s\n" "${remote_tags[@]}" | grep -qx "${tag}"; then
+            msg_fmt "${MSG_PUSH_TAGS_ALREADY_REMOTE}" "${tag}" "${remote}" >&2
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# _push_tags_execute — Push all local tags to remote
+# Arguments: $1 — remote
+# Respects AUTOGIT_DRY_RUN
+# ---------------------------------------------------------------------------
+_push_tags_execute() {
+    local remote="$1"
+
+    if [[ "${AUTOGIT_DRY_RUN:-false}" == "true" ]]; then
+        msg_fmt "${MSG_PUSH_TAGS_DRY}" "${remote}"
+        msg_info "${MSG_DRY_RUN}"
+        return 0
+    fi
+
+    msg_fmt "${MSG_PUSH_TAGS_PUSHING}" "${remote}"
+    git push "${remote}" --tags
+    msg_fmt "${MSG_PUSH_TAGS_SUCCESS}" "${remote}"
+}
+
+# ---------------------------------------------------------------------------
+# module_push_tags — Public entry point for the push-tags module
+# Usage: module_push_tags [--remote <name>]
+# ---------------------------------------------------------------------------
+module_push_tags() {
+    _autogit_require_repo
+
+    local remote="origin"
+
+    # Parse push-tags-specific arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --remote)
+                [[ $# -lt 2 ]] && msg_die \
+                    "$(printf "%s" "${MSG_COMMIT_MISSING_ARG}" "--remote")"
+                remote="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cmd_help
+                return 0
+                ;;
+            *)
+                msg_fmt "${MSG_PUSH_TAGS_INVALID_OPT}" "$1" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    printf "\n%s\n\n" "${MSG_PUSH_TAGS_TITLE}"
+
+    # Verify local tags exist before doing anything else
+    local local_tags
+    local_tags="$(_push_tags_check_local)" || return 0
+
+    # Resolve remote URL for SSH validation (reuses push module helpers)
+    local remote_url
+    remote_url="$(_push_resolve_remote "${remote}")"
+
+    # Validate SSH or HTTPS connection before pushing
+    _push_validate_connection "${remote_url}"
+
+    # Check which tags already exist on the remote and warn about them
+    local remote_tags_raw
+    remote_tags_raw="$(_push_tags_check_remote "${remote}")"
+
+    if [[ -n "${remote_tags_raw}" ]]; then
+        mapfile -t remote_tags_array <<< "${remote_tags_raw}"
+        _push_tags_report_skipped "${remote}" "${remote_tags_array[@]}"
+    fi
+
+    # Push all local tags (git handles deduplication with remote)
+    _push_tags_execute "${remote}"
+}

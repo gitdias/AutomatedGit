@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.0] — 2026-03-19
+
+### Added
+- `modules/ssh_setup` — new SSH setup wizard module
+- `module_ssh_setup()` — public entry point: `autogit ssh-setup [--host github|gitlab|sourceforge|codeberg]`
+- `_ssh_scan_keys()` — scans `~/.ssh` for existing key pairs:
+  - Detects `*_ed25519`, `id_ed25519`, `id_rsa`, `id_ecdsa`, `id_dsa` with matching `.pub`
+- `_ssh_prompt_use_existing()` — lists existing keys and allows selecting one or creating a new key
+- `_ssh_detect_service_from_keyname()` — infers service (github/gitlab/sourceforge/codeberg) from key file name
+- `_ssh_prompt_service()` — interactive selection of version control service
+- `_ssh_prompt_keyname()` — suggests key name `~/.ssh/autogit_<service>_ed25519` and lets user override
+- `_ssh_generate_key()` — generates ed25519 key without passphrase (`ssh-keygen -N ""`)
+- `_ssh_start_agent()` — starts `ssh-agent` (session-only) and runs `ssh-add <key>`
+- `_ssh_show_pubkey()` — displays public key in a highlighted block
+- `_ssh_show_tutorial()` — shows minimal copy-paste tutorials for:
+  - GitHub, GitLab, SourceForge, Codeberg
+- `_ssh_retest()` — re-tests SSH auth via `ssh -T git@<host>` with retry loop
+- `_ssh_service_host()` / `_ssh_service_success_pattern()` — per-service host mapping and success patterns
+- `ssh-setup` command registered in dispatcher and `cmd_help()`
+- i18n keys for SSH wizard added to `pt_BR.lang` and `en_US.lang`
+
+### Changed
+- Module loader `_autogit_load_module()` now loads files without `.sh` extension
+- All modules renamed (no extension):
+  - `modules/commit.sh` → `modules/commit`
+  - `modules/push.sh` → `modules/push`
+  - `modules/push_tags.sh` → `modules/push_tags`
+- `MSG_PUSH_SSH_HINT2` updated to reference `autogit ssh-setup` as the recommended way to configure SSH
+- `autogit` main script bumped to v0.5.0
+- `cmd_help()` updated to list `ssh-setup` command
+
+### Notes
+- SSH wizard supports four services: GitHub, GitLab, SourceForge and Codeberg
+- Keys are generated **without passphrase**, optimized for automation
+- `ssh-agent` is configured only for the current shell session; no changes to shell rc files
+- Push behavior remains split:
+  - `autogit push` → branch only
+  - `autogit push-tags` → tags only
+
+---
+
+## [0.4.0] — 2026-03-19
+
+### Added
+- `modules/push_tags.sh` — new push-tags module with local/remote tag validation
+- `module_push_tags()` — public entry point: supports `--remote` and `--dry-run`
+- `_push_tags_check_local()` — verifies local tags exist before any network operation
+- `_push_tags_check_remote()` — lists remote tags via `git ls-remote --tags`
+- `_push_tags_report_skipped()` — warns about tags already present on the remote
+- `_push_tags_execute()` — performs `git push <remote> --tags` with dry-run support
+- `autogit push-tags` registered in main dispatcher and `cmd_help()`
+- `--push-tags` flag added to `autogit commit` (autonomous mode)
+- `_commit_ask_push_tags()` — isolated function for interactive post-push tag prompt
+- `_commit_validate_tag()` — validates tag format (`vX.Y.Z`) and existence
+  - Checks local tag existence via `git tag --list`
+  - Checks remote tag existence via `git ls-remote --tags`
+  - Interactive mode: warns on bad format and asks for confirmation
+  - Autonomous mode: aborts immediately on bad format or existing tag
+- i18n keys added for tag validation and push-tags in `pt_BR.lang` and `en_US.lang`
+
+### Changed
+- `modules/commit.sh` updated: added `--push-tags` flag parsing in `_commit_autonomous()`
+- `modules/commit.sh` updated: `_commit_interactive()` now calls `_commit_validate_tag()`
+- `modules/commit.sh` updated: `_commit_ask_push()` now calls `_commit_ask_push_tags()` after branch push
+- `modules/commit.sh` updated: `module_commit()` handles `--push-tags` in autonomous flow
+- `autogit` dispatcher updated: `push-tags` loads both `push.sh` and `push_tags.sh`
+- `autogit` main script bumped to v0.4.0
+- `cmd_help()` updated to list `push-tags` command
+
+### Notes
+- `push-tags` reuses SSH validation helpers from `push.sh` — no duplication
+- `--push-tags` without `--push` in autonomous mode is silently ignored
+- Branch push remains `git push <remote> <branch>`; tag push is `git push <remote> --tags`
+
+---
+
+## [0.3.1] — 2026-03-18
+
+### Fixed
+- `_push_resolve_remote()`: redirect all `msg_fmt` and `msg_info` calls to stderr
+- `_push_resolve_branch()`: redirect `msg_fmt` call to stderr
+- Prevent log output from polluting stdout when functions are captured via `$()`
+- Root cause: corrupted URL string was reaching `_push_extract_host()`, triggering
+  "unrecognized protocol" error on every push attempt
+- Replace `echo` with `printf` in `_push_test_ssh()` for consistency
+
+---
+
 ## [0.3.0] — 2026-03-18
 
 ### Added
@@ -28,15 +116,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `modules/commit.sh` updated: added `--push`, `--remote`, `--branch` flag parsing
-- `modules/commit.sh` updated: `_commit_execute()` now calls `_commit_ask_push()` after success
+- `modules/commit.sh` updated: `module_commit()` calls `_commit_ask_push()` after success
 - `autogit` main script bumped to v0.3.0
 - `cmd_help()` updated to list `push` command with flags
 
 ### Notes
-- Push of tags (`git push --tags`) is intentionally excluded — planned for v0.4.0
-- Full SSH wizard (key generation, ssh-agent, multi-platform tutorials) planned for v0.5.0
+- Push of tags (`git push --tags`) intentionally excluded — delivered in v0.4.0
+- Full SSH wizard (key generation, ssh-agent, multi-platform tutorials) delivered in v0.5.0
 - For HTTPS remotes, SSH validation is skipped and push proceeds directly
-- If SSH validation fails, AutoGit reports the failure clearly and exits — key setup wizard comes in v0.5.0
 
 ---
 
@@ -65,11 +152,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `_autogit_load_locale()` now supports runtime override via `AUTOGIT_LANG_OVERRIDE`
 - `cmd_help()` updated to list `commit` command and global options
 - Project structure updated: `modules/` directory added
-
-### Notes
-- Calling `autogit` with no arguments launches the interactive commit wizard
-- Tag is created as an annotated tag (`git tag -a`) with the resolved tag message
-- Push is not yet implemented — planned for v0.3.0
 
 ---
 

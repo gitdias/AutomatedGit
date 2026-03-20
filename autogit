@@ -5,7 +5,7 @@
 # Compatible with: bash 4+, zsh 5+
 # Author: Sandro Dias <https://github.com/gitdias>
 # License: Apache-2.0
-# Version: 0.3.0
+# Version: 0.5.0
 
 # ---------------------------------------------------------------------------
 # Strict mode — exit on error, undefined variable or pipe failure
@@ -15,7 +15,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Internal constants
 # ---------------------------------------------------------------------------
-readonly AUTOGIT_VERSION="0.3.0"
+readonly AUTOGIT_VERSION="0.5.0"
 readonly AUTOGIT_DIR="${HOME}/.local/bin/autogit"
 readonly AUTOGIT_I18N_DIR="${AUTOGIT_DIR}/i18n"
 readonly AUTOGIT_MODULES_DIR="${AUTOGIT_DIR}/modules"
@@ -53,11 +53,11 @@ _autogit_load_locale() {
 }
 
 # ---------------------------------------------------------------------------
-# Module loader
+# Module loader — loads modules without .sh extension
 # ---------------------------------------------------------------------------
 _autogit_load_module() {
     local module_name="$1"
-    local module_file="${AUTOGIT_MODULES_DIR}/${module_name}.sh"
+    local module_file="${AUTOGIT_MODULES_DIR}/${module_name}"
 
     if [[ ! -f "${module_file}" ]]; then
         echo "ERROR: Module not found: ${module_file}" >&2
@@ -111,8 +111,11 @@ _autogit_require_repo() {
 
 # ---------------------------------------------------------------------------
 # Global options pre-parser
+# Separates global flags from command arguments.
+# Populates: AUTOGIT_ARGS (array), AUTOGIT_DRY_RUN, AUTOGIT_LANG_OVERRIDE
 # ---------------------------------------------------------------------------
 _autogit_parse_globals() {
+    # Declare as plain arrays — avoid issues with set -u on empty arrays
     AUTOGIT_ARGS=()
     AUTOGIT_DRY_RUN="false"
     AUTOGIT_LANG_OVERRIDE=""
@@ -121,12 +124,18 @@ _autogit_parse_globals() {
         case "$1" in
             --lang|-l)
                 shift
-                AUTOGIT_LANG_OVERRIDE="${1:-}"
+                # Guard: --lang requires a value
+                if [[ $# -eq 0 ]]; then
+                    echo "ERROR: --lang requires a locale argument." >&2
+                    exit 1
+                fi
+                AUTOGIT_LANG_OVERRIDE="$1"
                 ;;
             --dry-run)
                 AUTOGIT_DRY_RUN="true"
                 ;;
             *)
+                # Everything else is a command or command argument
                 AUTOGIT_ARGS+=("$1")
                 ;;
         esac
@@ -144,10 +153,12 @@ cmd_help() {
     printf "\n%s — v%s\n" "${MSG_HELP_HEADER}" "${AUTOGIT_VERSION}"
     printf "%s\n\n" "${MSG_HELP_USAGE}"
     printf "%s\n" "${MSG_HELP_COMMANDS}"
-    printf "  %-14s %s\n" "commit"  "Commit + tag (interativo ou autônomo)"
-    printf "  %-14s %s\n" "push"    "Push para remote com validação SSH"
-    printf "  %-14s %s\n" "help"    "${MSG_HELP_FOOTER}"
-    printf "  %-14s %s\n" "version" "Exibe versão do AutoGit"
+    printf "  %-16s %s\n" "commit"    "Commit + tag (interativo ou autônomo)"
+    printf "  %-16s %s\n" "push"      "Push da branch com validação SSH"
+    printf "  %-16s %s\n" "push-tags" "Push de todas as tags locais para o remote"
+    printf "  %-16s %s\n" "ssh-setup" "Wizard de configuração SSH (chave, agent, tutorial)"
+    printf "  %-16s %s\n" "help"      "${MSG_HELP_FOOTER}"
+    printf "  %-16s %s\n" "version"   "Exibe versão do AutoGit"
     printf "\n%s\n" "${MSG_HELP_OPTIONS}"
     printf "%s\n" "${MSG_HELP_OPT_HELP}"
     printf "%s\n" "${MSG_HELP_OPT_LANG}"
@@ -164,24 +175,45 @@ cmd_version() {
 
 # ---------------------------------------------------------------------------
 # Command dispatcher
+# Receives the contents of AUTOGIT_ARGS — first element is the command,
+# remaining elements are command-specific arguments.
 # ---------------------------------------------------------------------------
 _autogit_dispatch() {
-    local cmd="${1:-}"
-    [[ $# -gt 0 ]] && shift || true
+    # Extract command from first positional argument
+    local cmd=""
+    if [[ ${#AUTOGIT_ARGS[@]} -gt 0 ]]; then
+        cmd="${AUTOGIT_ARGS[0]}"
+    fi
+
+    # Build command arguments array (everything after the command)
+    local cmd_args=()
+    if [[ ${#AUTOGIT_ARGS[@]} -gt 1 ]]; then
+        cmd_args=("${AUTOGIT_ARGS[@]:1}")
+    fi
 
     case "${cmd}" in
         "")
-            # No command: interactive commit wizard
+            # No command: launch interactive commit wizard
             _autogit_load_module "commit"
             module_commit
             ;;
         commit)
             _autogit_load_module "commit"
-            module_commit "$@"
+            module_commit "${cmd_args[@]+"${cmd_args[@]}"}"
             ;;
         push)
             _autogit_load_module "push"
-            module_push "$@"
+            module_push "${cmd_args[@]+"${cmd_args[@]}"}"
+            ;;
+        push-tags)
+            # push_tags depends on push SSH helpers — load both
+            _autogit_load_module "push"
+            _autogit_load_module "push_tags"
+            module_push_tags "${cmd_args[@]+"${cmd_args[@]}"}"
+            ;;
+        ssh-setup)
+            _autogit_load_module "ssh_setup"
+            module_ssh_setup "${cmd_args[@]+"${cmd_args[@]}"}"
             ;;
         help|-h|--help)
             cmd_help
@@ -204,7 +236,7 @@ main() {
     _autogit_parse_globals "$@"
     _autogit_load_locale
     _autogit_check_deps
-    _autogit_dispatch "${AUTOGIT_ARGS[@]+"${AUTOGIT_ARGS[@]}"}"
+    _autogit_dispatch
 }
 
 main "$@"

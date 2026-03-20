@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+# modules/commit — Commit module for AutoGit
+# Handles interactive and autonomous commit + tag creation workflows.
+# Optionally triggers push and push-tags after a successful commit.
+#
+# Depends on: autogit (core), i18n locale already loaded
+# Compatible with: bash 4+, zsh 5+
+
+# ---------------------------------------------------------------------------
+# _commit_read_message — Resolve a message from raw input or file path
+# Arguments:
+#   $1 — raw input (inline message or file path)
+#   $2 — default file path if input is empty
+# Output: prints the resolved message to stdout; log messages go to stderr
+# ---------------------------------------------------------------------------
+_commit_read_message() {
+    local input="$1"
+    local default_file="$2"
+
+    if [[ -z "${input}" ]]; then
+        input="${default_file}"
+    fi
+
+    if [[ -f "${input}" ]]; then
+        msg_fmt "${MSG_COMMIT_READING_FILE}" "${input}" >&2
+        cat "${input}"
+        return 0
+    fi
+
+    if [[ -z "${input}" ]]; then
+        msg_fmt "${MSG_COMMIT_FILE_NOT_FOUND}" "${input}" >&2
+        return 1
+    fi
+
+    printf "%s" "${input}"
+}
+
+# ---------------------------------------------------------------------------
+# _commit_has_changes — Check if there are staged or unstaged changes
+# Returns 0 if changes exist, 1 if working tree is clean
+# ---------------------------------------------------------------------------
+_commit_has_changes() {
+    if git diff --quiet && git diff --cached --quiet; then
+        return 1
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _commit_validate_tag — Validate tag format and local/remote existence
+# Arguments: $1 — tag, $2 — remote, $3 — interactive (true|false)
+# ---------------------------------------------------------------------------
+_commit_validate_tag() {
+    local tag="$1"
+    local remote="${2:-origin}"
+    local interactive="${3:-false}"
+
+    if ! [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        msg_fmt "${MSG_COMMIT_TAG_INVALID_FORMAT}" "${tag}" >&2
+
+        if [[ "${interactive}" == "true" ]]; then
+            local answer=""
+            printf "%s" "${MSG_COMMIT_TAG_INVALID_CONFIRM}"
+            read -r answer
+            case "${answer,,}" in
+                s|y|sim|yes) : ;;
+                *) msg_die "${MSG_ABORTED}" ;;
+            esac
+        else
+            exit 1
+        fi
+    fi
+
+    if git tag --list "${tag}" | grep -qx "${tag}"; then
+        msg_fmt "${MSG_COMMIT_TAG_EXISTS_LOCAL}" "${tag}" >&2
+        exit 1
+    fi
+
+    if git ls-remote --tags "${remote}" 2>/dev/null \
+        | awk '{print $2}' \
+        | grep -v '\^{}' \
+        | sed 's|refs/tags/||' \
+        | grep -qx "${tag}"; then
+        msg_fmt "${MSG_COMMIT_TAG_EXISTS_REMOTE}" "${tag}" "${remote}" >&2
+        exit 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# _commit_interactive — Run the interactive commit wizard
+# ---------------------------------------------------------------------------
+_commit_interactive() {
+    printf "\n%s\n\n" "${MSG_COMMIT_TITLE}"
+
+    printf "%s " "${MSG_COMMIT_ENTER_TAG}"
+    read -r _TAG
+
+    [[ -z "${_TAG}" ]] && msg_die "${MSG_COMMIT_TAG_EMPTY}"
+
+    _commit_validate_tag "${_TAG}" "${_PUSH_REMOTE}" "true"
+
+    printf "%s " "${MSG_COMMIT_ENTER_MSGTAG}"
+    read -r _input_msgtag
+    _MSG_TAG="$(_commit_read_message "${_input_msgtag}" "./.msgtag")" || exit 1
+
+    printf "%s " "${MSG_COMMIT_ENTER_MSGCOMMIT}"
+    read -r _input_msgcommit
+    _MSG_COMMIT="$(_commit_read_message "${_input_msgcommit}" "./.msgcommit")" || exit 1
+}
+
+# ---------------------------------------------------------------------------
+# _commit_autonomous — Parse CLI arguments for autonomous mode
+# ---------------------------------------------------------------------------
+_commit_autonomous() {
+    local args=("$@")
+    local i=0
+
+    while [[ ${i} -lt ${#args[@]} ]]; do
+        local arg="${args[${i}]}"
+
+        case "${arg}" in
+            --tag)
+                i=$(( i + 1 ))
+                _TAG="${args[${i}]:-}"
+                ;;
+            --msgtag)
+                i=$(( i + 1 ))
+                _MSG_TAG="$(_commit_read_message \
+                    "${args[${i}]:-}" "./.msgtag")" || exit 1
+                ;;
+            --msgcommit)
+                i=$(( i + 1 ))
+                _MSG_COMMIT="$(_commit_read_message \
+                    "${args[${i}]:-}" "./.msgcommit")" || exit 1
+                ;;
+            --push)
+                _PUSH_AFTER="true"
+                ;;
+            --push-tags)
+                _PUSH_TAGS_AFTER="true"
+                ;;
+            --remote)
+                i=$(( i + 1 ))
+                _PUSH_REMOTE="${args[${i}]:-origin}"
+                ;;
+            --branch)
+                i=$(( i + 1 ))
+                _PUSH_BRANCH="${args[${i}]:-}"
+                ;;
+            -h|--help)
+                cmd_help
+                exit 0
+                ;;
+            *)
+                msg_fmt "${MSG_COMMIT_INVALID_OPT}" "${arg}" >&2
+                exit 1
+                ;;
+        esac
+
+        i=$(( i + 1 ))
+    done
+
+    [[ -z "${_TAG}" ]] && msg_die "${MSG_COMMIT_TAG_EMPTY}"
+
+    _commit_validate_tag "${_TAG}" "${_PUSH_REMOTE}" "false"
+}
+
+# ---------------------------------------------------------------------------
+# _commit_execute — Stage, commit and create annotated tag
+# ---------------------------------------------------------------------------
+_commit_execute() {
+    if ! _commit_has_changes; then
+        msg_info "${MSG_COMMIT_NOTHING}"
+        return 0
+    fi
+
+    if [[ "${AUTOGIT_DRY_RUN:-false}" == "true" ]]; then
+        msg_fmt "${MSG_COMMIT_DRY_TAG}"    "${_TAG}"
+        msg_fmt "${MSG_COMMIT_DRY_MSG}"    "${_MSG_COMMIT}"
+        msg_fmt "${MSG_COMMIT_DRY_MSGTAG}" "${_MSG_TAG}"
+        msg_info "${MSG_DRY_RUN}"
+        return 0
+    fi
+
+    msg_info "${MSG_COMMIT_STAGING}"
+    git add --all
+
+    msg_info "${MSG_COMMIT_CREATING}"
+    git commit -m "${_MSG_COMMIT}"
+
+    msg_fmt "${MSG_COMMIT_TAGGING}" "${_TAG}"
+    git tag -a "${_TAG}" -m "${_MSG_TAG}"
+
+    msg_info "${MSG_COMMIT_SUCCESS}"
+}
+
+# ---------------------------------------------------------------------------
+# _commit_ask_push_tags — Ask whether to push tags after branch push
+# Arguments: $1 — remote (default: origin)
+# ---------------------------------------------------------------------------
+_commit_ask_push_tags() {
+    local remote="${1:-origin}"
+    local answer=""
+
+    printf "%s" "${MSG_COMMIT_PUSH_TAGS_PROMPT}"
+    read -r answer
+
+    case "${answer,,}" in
+        s|y|sim|yes)
+            _autogit_load_module "push_tags"
+            module_push_tags --remote "${remote}"
+            ;;
+        *)
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# _commit_ask_push — Ask whether to push branch now or accumulate commits
+# Arguments: $1 — remote (default: origin), $2 — branch (default: "")
+# ---------------------------------------------------------------------------
+_commit_ask_push() {
+    local remote="${1:-origin}"
+    local branch="${2:-}"
+    local answer=""
+
+    printf "%s" "${MSG_COMMIT_PUSH_PROMPT}"
+    read -r answer
+
+    case "${answer,,}" in
+        p|push)
+            _autogit_load_module "push"
+            local push_args=("--remote" "${remote}")
+            [[ -n "${branch}" ]] && push_args+=("--branch" "${branch}")
+            module_push "${push_args[@]}"
+
+            _commit_ask_push_tags "${remote}"
+            ;;
+        *)
+            msg_info "${MSG_COMMIT_PUSH_ACCUMULATE}"
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# module_commit — Public entry point for the commit module
+# ---------------------------------------------------------------------------
+module_commit() {
+    _autogit_require_repo
+
+    local _TAG=""
+    local _MSG_TAG=""
+    local _MSG_COMMIT=""
+    local _PUSH_AFTER="false"
+    local _PUSH_TAGS_AFTER="false"
+    local _PUSH_REMOTE="origin"
+    local _PUSH_BRANCH=""
+
+    if [[ $# -eq 0 ]]; then
+        _commit_interactive
+    else
+        _commit_autonomous "$@"
+    fi
+
+    _commit_execute
+
+    if ! _commit_has_changes && [[ "${AUTOGIT_DRY_RUN:-false}" != "true" ]]; then
+        return 0
+    fi
+
+    if [[ "${_PUSH_AFTER}" == "true" ]]; then
+        _autogit_load_module "push"
+        local push_args=("--remote" "${_PUSH_REMOTE}")
+        [[ -n "${_PUSH_BRANCH}" ]] && push_args+=("--branch" "${_PUSH_BRANCH}")
+        module_push "${push_args[@]}"
+
+        if [[ "${_PUSH_TAGS_AFTER}" == "true" ]]; then
+            _autogit_load_module "push_tags"
+            module_push_tags --remote "${_PUSH_REMOTE}"
+        fi
+
+    elif [[ $# -eq 0 ]]; then
+        _commit_ask_push "${_PUSH_REMOTE}" "${_PUSH_BRANCH}"
+    fi
+}

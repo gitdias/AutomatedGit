@@ -1,0 +1,413 @@
+#!/usr/bin/env bash
+# modules/ssh_setup — SSH setup wizard for AutoGit
+# Guides the user through SSH key detection, generation, agent setup,
+# service tutorial and connection validation.
+#
+# Supported services: GitHub, GitLab, SourceForge, Codeberg
+# Compatible with: bash 4+, zsh 5+
+
+# ---------------------------------------------------------------------------
+# _ssh_service_host — Return the SSH host for a given service slug
+# Arguments: $1 — service slug (github|gitlab|sourceforge|codeberg)
+# Output: prints hostname to stdout
+# ---------------------------------------------------------------------------
+_ssh_service_host() {
+    case "$1" in
+        github)      printf "github.com" ;;
+        gitlab)      printf "gitlab.com" ;;
+        sourceforge) printf "git.code.sf.net" ;;
+        codeberg)    printf "codeberg.org" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# _ssh_service_success_pattern — Return grep pattern for SSH success output
+# Arguments: $1 — service slug
+# Output: prints grep-compatible pattern to stdout
+# ---------------------------------------------------------------------------
+_ssh_service_success_pattern() {
+    case "$1" in
+        github)      printf "successfully authenticated" ;;
+        gitlab)      printf "welcome to gitlab" ;;
+        sourceforge) printf "interactive git shell is not enabled\|welcome to sourceforge" ;;
+        codeberg)    printf "hi .*, you've successfully authenticated" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# _ssh_detect_service_from_keyname — Try to detect service from key filename
+# Arguments: $1 — key file base name (without path)
+# Output: prints service slug to stdout, or empty string if not detected
+# ---------------------------------------------------------------------------
+_ssh_detect_service_from_keyname() {
+    local name="${1,,}"   # lowercase
+
+    case "${name}" in
+        *github*)      printf "github" ;;
+        *gitlab*)      printf "gitlab" ;;
+        *sourceforge*) printf "sourceforge" ;;
+        *codeberg*)    printf "codeberg" ;;
+        *)             printf "" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# _ssh_scan_keys — Scan ~/.ssh for existing key pairs
+# Output: prints newline-separated list of private key paths to stdout
+# Detects: *_ed25519, id_ed25519, id_rsa, id_ecdsa, id_dsa and autogit_*
+# ---------------------------------------------------------------------------
+_ssh_scan_keys() {
+    local ssh_dir="${HOME}/.ssh"
+    local found=()
+
+    # Candidate patterns: covers standard names and autogit-style names
+    local candidates=()
+    while IFS= read -r -d '' f; do
+        candidates+=("${f}")
+    done < <(find "${ssh_dir}" -maxdepth 1 -type f \
+        |$ -name "*_ed25519" \
+        -o -name "id_rsa" \
+        -o -name "id_ecdsa" \
+        -o -name "id_dsa" \
+        -o -name "id_ed25519" $| \
+        -print0 2>/dev/null)
+
+    for key in "${candidates[@]}"; do
+        # Only include if the corresponding .pub file also exists
+        if [[ -f "${key}.pub" ]]; then
+            found+=("${key}")
+        fi
+    done
+
+    printf "%s\n" "${found[@]:-}"
+}
+
+# ---------------------------------------------------------------------------
+# _ssh_prompt_use_existing — Show found keys and ask user what to do
+# Arguments: $@ — list of private key paths
+# Output: prints chosen key path to stdout, or "new" if user wants new key
+# ---------------------------------------------------------------------------
+_ssh_prompt_use_existing() {
+    local keys=("$@")
+
+    msg_info "${MSG_SSH_FOUND_KEYS}" >&2
+    local i=1
+    for key in "${keys[@]}"; do
+        msg_fmt "${MSG_SSH_FOUND_PAIR}" "${i}" "${key}" >&2
+        i=$(( i + 1 ))
+    done
+
+    printf "\n" >&2
+
+    local answer=""
+    while true; do
+        printf "%s" "${MSG_SSH_USE_EXISTING}" >&2
+        read -r answer
+
+        if [[ "${answer,,}" == "n" || "${answer,,}" == "new" ]]; then
+            printf "new"
+            return 0
+        fi
+
+        if [[ "${answer}" =~ ^[0-9]+$ ]]; then
+            local idx=$(( answer - 1 ))
+            if [[ ${idx} -ge 0 && ${idx} -lt ${#keys[@]} ]]; then
+                printf "%s" "${keys[${idx}]}"
+                return 0
+            fi
+        fi
+
+        msg_info "${MSG_SSH_INVALID_CHOICE}" >&2
+    done
+}
+
+# ---------------------------------------------------------------------------
+# _ssh_prompt_service — Ask user to select a version control service
+# Output: prints service slug to stdout (github|gitlab|sourceforge|codeberg)
+# ---------------------------------------------------------------------------
+_ssh_prompt_service() {
+    printf "\n" >&2
+    msg_info "${MSG_SSH_SELECT_SERVICE}" >&2
+    printf "%b\n" "${MSG_SSH_SERVICE_LIST}" >&2
+    printf "\n" >&2
+
+    local answer=""
+    while true; do
+        printf "%s" "${MSG_SSH_SERVICE_PROMPT}" >&2
+        read -r answer
+
+        case "${answer}" in
+            1) printf "github";      return 0 ;;
+            2) printf "gitlab";      return 0 ;;
+            3) printf "sourceforge"; return 0 ;;
+            4) printf "codeberg";    return 0 ;;
+            *) msg_info "${MSG_SSH_SERVICE_INVALID}" >&2 ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------------------
+# _ssh_prompt_keyname — Suggest and confirm key filename
+# Arguments: $1 — service slug
+# Output: prints full key path to stdout
+# ---------------------------------------------------------------------------
+_ssh_prompt_keyname() {
+    local service="$1"
+    local suggested="${HOME}/.ssh/autogit_${service}_ed25519"
+
+    msg_fmt "${MSG_SSH_KEY_NAME_SUGGEST}" "${suggested}" >&2
+    printf "%s" "${MSG_SSH_KEY_NAME_PROMPT}" >&2
+    local answer=""
+    read -r answer
+
+    if [[ -z "${answer}" ]]; then
+        printf "%s" "${suggested}"
+    else
+        # Expand ~ if user typed it literally
+        printf "%s" "${answer/#\~/${HOME}}"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# _ssh_generate_key — Generate ed25519 key without passphrase
+# Arguments: $1 — full key path, $2 — email comment
+# ---------------------------------------------------------------------------
+_ssh_generate_key() {
+    local key_path="$1"
+    local email="$2"
+
+    # Check for existing key and ask before overwriting
+    if [[ -f "${key_path}" ]]; then
+        msg_fmt "${MSG_SSH_KEY_EXISTS}" "${key_path}" >&2
+        printf "%s" "${MSG_SSH_KEY_EXISTS_OVERWRITE}" >&2
+        local answer=""
+        read -r answer
+        case "${answer,,}" in
+            s|y|sim|yes) : ;;
+            *)
+                msg_info "${MSG_SSH_KEY_ABORT}"
+                exit 0
+                ;;
+        esac
+    fi
+
+    msg_fmt "${MSG_SSH_GENERATING}" "${key_path}"
+    ssh-keygen -t ed25519 -C "${email}" -f "${key_path}" -N "" -q
+    msg_fmt "${MSG_SSH_GENERATED}" "${key_path}"
+}
+
+# ---------------------------------------------------------------------------
+# _ssh_start_agent — Start ssh-agent if not running and add the key
+# Arguments: $1 — full key path
+# ---------------------------------------------------------------------------
+_ssh_start_agent() {
+    local key_path="$1"
+
+    if [[ -z "${SSH_AUTH_SOCK:-}" ]] || ! ssh-add -l &>/dev/null; then
+        msg_info "${MSG_SSH_AGENT_STARTING}"
+        # Eval exports SSH_AUTH_SOCK and SSH_AGENT_PID into current session only
+        eval "$(ssh-agent -s)" >/dev/null
+    else
+        msg_info "${MSG_SSH_AGENT_RUNNING}"
+    fi
+
+    msg_fmt "${MSG_SSH_AGENT_ADDING}" "${key_path}"
+    ssh-add "${key_path}"
+    msg_info "${MSG_SSH_AGENT_ADDED}"
+}
+
+# ---------------------------------------------------------------------------
+# _ssh_show_pubkey — Display public key content prominently
+# Arguments: $1 — full private key path (will read .pub counterpart)
+# ---------------------------------------------------------------------------
+_ssh_show_pubkey() {
+    local key_path="$1"
+    local pub_path="${key_path}.pub"
+
+    printf "\n%s\n" "${MSG_SSH_PUBKEY_HEADER}"
+    cat "${pub_path}"
+    printf "%s\n\n" "${MSG_SSH_PUBKEY_FOOTER}"
+}
+
+# ---------------------------------------------------------------------------
+# _ssh_show_tutorial — Display platform-specific registration instructions
+# Arguments: $1 — service slug
+# ---------------------------------------------------------------------------
+_ssh_show_tutorial() {
+    local service="$1"
+
+    case "${service}" in
+        github)      printf "%b\n\n" "${MSG_SSH_TUTORIAL_GITHUB}" ;;
+        gitlab)      printf "%b\n\n" "${MSG_SSH_TUTORIAL_GITLAB}" ;;
+        sourceforge) printf "%b\n\n" "${MSG_SSH_TUTORIAL_SOURCEFORGE}" ;;
+        codeberg)    printf "%b\n\n" "${MSG_SSH_TUTORIAL_CODEBERG}" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# _ssh_retest — Test SSH connection with retry loop
+# Arguments: $1 — service slug
+# ---------------------------------------------------------------------------
+_ssh_retest() {
+    local service="$1"
+    local host
+    host="$(_ssh_service_host "${service}")"
+    local pattern
+    pattern="$(_ssh_service_success_pattern "${service}")"
+
+    while true; do
+        msg_fmt "${MSG_SSH_TESTING}" "${host}"
+
+        local ssh_output exit_code=0
+        ssh_output="$(ssh -T \
+            -o BatchMode=yes \
+            -o ConnectTimeout=8 \
+            "git@${host}" 2>&1)" || exit_code=$?
+
+        local output_lower
+        output_lower="$(printf "%s" "${ssh_output}" | tr '[:upper:]' '[:lower:]')"
+
+        if printf "%s" "${output_lower}" | grep -qE "${pattern}"; then
+            msg_fmt "${MSG_SSH_TEST_OK}" "${host}"
+            return 0
+        fi
+
+        msg_fmt "${MSG_SSH_TEST_FAIL}" "${host}"
+        printf "%s" "${MSG_SSH_RETRY_PROMPT}"
+        local retry=""
+        read -r retry
+        case "${retry,,}" in
+            s|y|sim|yes) continue ;;
+            *)
+                msg_info "${MSG_SSH_SETUP_ABORTED}"
+                return 1
+                ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------------------
+# module_ssh_setup — Public entry point for the SSH setup wizard
+# Usage: module_ssh_setup [--host github|gitlab|sourceforge|codeberg]
+# ---------------------------------------------------------------------------
+module_ssh_setup() {
+    local forced_service=""
+
+    # Parse ssh-setup arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --host)
+                [[ $# -lt 2 ]] && msg_die \
+                    "$(printf "%s" "${MSG_COMMIT_MISSING_ARG}" "--host")"
+                case "${2,,}" in
+                    github|gitlab|sourceforge|codeberg)
+                        forced_service="${2,,}"
+                        ;;
+                    *)
+                        msg_fmt "${MSG_SSH_HOST_UNKNOWN}" "$2"
+                        exit 1
+                        ;;
+                esac
+                shift 2
+                ;;
+            -h|--help)
+                cmd_help
+                return 0
+                ;;
+            *)
+                msg_fmt "${MSG_SSH_INVALID_OPT}" "$1" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    printf "\n%s\n\n" "${MSG_SSH_TITLE}"
+
+    # -------------------------------------------------------------------
+    # Step 1 — Scan for existing SSH keys
+    # -------------------------------------------------------------------
+    msg_info "${MSG_SSH_SCANNING}"
+
+    local key_path=""
+    local service=""
+    local existing_keys=()
+
+    mapfile -t existing_keys < <(_ssh_scan_keys | grep -v '^$' || true)
+
+    if [[ ${#existing_keys[@]} -gt 0 ]]; then
+        local choice
+        choice="$(_ssh_prompt_use_existing "${existing_keys[@]}")"
+
+        if [[ "${choice}" != "new" ]]; then
+            # User chose an existing key
+            key_path="${choice}"
+            msg_fmt "${MSG_SSH_USING_KEY}" "${key_path}"
+
+            # Try to detect service from key filename
+            local base_name
+            base_name="$(basename "${key_path}")"
+            service="$(_ssh_detect_service_from_keyname "${base_name}")"
+
+            # If detection failed and --host not provided, ask manually
+            if [[ -z "${service}" && -z "${forced_service}" ]]; then
+                msg_info "${MSG_SSH_DETECT_HOST_PROMPT}"
+                service="$(_ssh_prompt_service)"
+            fi
+        fi
+    else
+        msg_info "${MSG_SSH_NO_KEYS}"
+    fi
+
+    # -------------------------------------------------------------------
+    # Step 2 — Generate new key if needed
+    # -------------------------------------------------------------------
+    if [[ -z "${key_path}" ]]; then
+        # Determine service for key naming
+        if [[ -n "${forced_service}" ]]; then
+            service="${forced_service}"
+        else
+            service="$(_ssh_prompt_service)"
+        fi
+
+        # Suggest and confirm key name
+        key_path="$(_ssh_prompt_keyname "${service}")"
+
+        # Prompt for email
+        local email=""
+        while [[ -z "${email}" ]]; do
+            printf "%s" "${MSG_SSH_EMAIL_PROMPT}"
+            read -r email
+            [[ -z "${email}" ]] && msg_info "${MSG_SSH_EMAIL_EMPTY}"
+        done
+
+        # Generate key without passphrase
+        _ssh_generate_key "${key_path}" "${email}"
+    fi
+
+    # Override service with --host flag if provided
+    [[ -n "${forced_service}" ]] && service="${forced_service}"
+
+    # -------------------------------------------------------------------
+    # Step 3 — Start ssh-agent and add key
+    # -------------------------------------------------------------------
+    _ssh_start_agent "${key_path}"
+
+    # -------------------------------------------------------------------
+    # Step 4 — Show public key and platform tutorial
+    # -------------------------------------------------------------------
+    _ssh_show_pubkey "${key_path}"
+    _ssh_show_tutorial "${service}"
+
+    # -------------------------------------------------------------------
+    # Step 5 — Wait for user to register the key on the platform
+    # -------------------------------------------------------------------
+    printf "%s" "${MSG_SSH_WAIT_CONFIRM}"
+    read -r _ignored
+
+    # -------------------------------------------------------------------
+    # Step 6 — Retest SSH connection
+    # -------------------------------------------------------------------
+    if _ssh_retest "${service}"; then
+        msg_info "${MSG_SSH_SETUP_DONE}"
+    fi
+}
